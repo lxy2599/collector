@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edge-metrics-bundle
+  namespace: monitoring
+data:
+  nodes.conf: |
+    bupt-a=space_server:10s
+    k8s-worker1=default:10s
+    k8s-master=default:10s
+  space_server.sh: |
+    #!/bin/bash
+    # 增加 -f 强制读取，防止设备 busy，增加 2>/dev/null 防止报错污染输出
+    
+    temp_sum=0
+    temp_count=0
+
+    for addr in $(seq 0x48 0x4F); do
+        hex_addr=$(printf "%02X" $addr)
+        # 核心修改：使用 -f 
+        input_data=$(i2cget -f -y 0 0x$hex_addr 0x00 w 2>/dev/null)
+        
+        if [ ! -z "$input_data" ]; then
+            decimal_data=$((input_data))
+            low_byte=$(( (decimal_data & 0xFF00) >> 8 ))
+            high_byte=$(( (decimal_data & 0x00FF) << 8 ))
+            little_endian=$(( low_byte | high_byte ))
+            shifted_data=$(( little_endian >> 4 ))
+            current_temp=$(echo "scale=4; $shifted_data * 0.0625" | bc)
+            temp_sum=$(echo "$temp_sum + $current_temp" | bc)
+            temp_count=$((temp_count + 1))
+        fi
+    done
+
+    if [ $temp_count -gt 0 ]; then
+        avg_temp=$(echo "scale=4; $temp_sum / $temp_count" | bc)
+        echo "temperature=${avg_temp}"
+    fi
+
+    # 电压监控增加 -f
+    cpu_voltage_raw=$(i2cget -f -y 1 0x41 0x02 w 2>/dev/null)
+    if [ ! -z "$cpu_voltage_raw" ]; then
+        cpu_voltage_hex_le=$(echo $cpu_voltage_raw | awk '{print toupper(substr($1,5,2) substr($1,3,2))}')
+        cpu_voltage=$(echo "ibase=16; $cpu_voltage_hex_le" | bc)
+        cpu_voltage=$(echo "scale=4; $cpu_voltage * 1.25 / 1000" | bc)
+        echo "cpu_voltage=${cpu_voltage}"
+    fi
+
+    total_voltage_raw=$(i2cget -f -y 1 0x40 0x02 w 2>/dev/null)
+    if [ ! -z "$total_voltage_raw" ]; then
+        total_voltage_hex_le=$(echo $total_voltage_raw | awk '{print toupper(substr($1,5,2) substr($1,3,2))}')
+        total_voltage=$(echo "ibase=16; $total_voltage_hex_le" | bc)
+        total_voltage=$(echo "scale=4; $total_voltage * 1.25 / 1000" | bc)
+        echo "total_voltage=${total_voltage}"
+    fi
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter-arm64
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      # 【关键 1】只在 ARM64 节点上运行
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      
+      # 【关键 2】使用 Host 网络，确保能监控宿主机网络
+      hostNetwork: true
+      hostPID: true
+      
+      containers:
+      # --- 容器 A: Node Exporter ---
+      - name: node-exporter
+        image: collector/node-exporter:v1.10.2-arm64
+        args:
+          - "--path.rootfs=/host"
+          - "--collector.textfile.directory=/var/lib/node_exporter_textfile"
+          - "--web.listen-address=:9101"
+        ports:
+          - name: metrics
+            containerPort: 9101
+            hostPort: 9101
+        volumeMounts:
+          - name: rootfs
+            mountPath: /host
+            readOnly: true
+          - name: shared-dir
+            mountPath: /var/lib/node_exporter_textfile
+            readOnly: false
+
+      # --- 容器 B: Sidecar ---
+      - name: metric-sidecar
+        image: edge-collector-go:arm64
+        securityContext:
+          privileged: true
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName # 注入真实的节点主机名
+        volumeMounts:
+          - name: scripts-vol
+            mountPath: /scripts
+          - name: shared-dir
+            mountPath: /var/lib/node_exporter_textfile
+          - name: dev-dir
+            mountPath: /dev
+
+      volumes:
+        - name: rootfs
+          hostPath: {path: /}
+        - name: shared-dir
+          emptyDir: {}
+        - name: scripts-vol
+          configMap:
+            name: edge-metrics-bundle
+            defaultMode: 0755
+        - name: dev-dir      # 【必须】定义宿主机设备卷
+          hostPath:
+            path: /dev
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-export
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  clusterIP: None
+  selector:
+    app: node-exporter
+  ports:
+    - name: metrics
+      port: 9101        # 外部访问端口
+      targetPort: 9101  # 对应 Pod 里的新端口
