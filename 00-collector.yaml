@@ -123,6 +123,9 @@ spec:
           - name: timezone
             mountPath: /etc/localtime
             readOnly: true
+          - name: udev
+            mountPath: /run/udev
+            readOnly: true
 
       # --- 容器 B: Sidecar ---
       - name: metric-sidecar
@@ -141,6 +144,9 @@ spec:
             mountPath: /var/lib/node_exporter_textfile
           - name: dev-dir
             mountPath: /dev
+          - name: timezone
+            mountPath: /etc/localtime
+            readOnly: true
       # --- 容器 C: vmagent (新增缓存推送容器) ---
       - name: vmagent
         image: 192.168.137.97:8086/hthx/vmagent:arm64-latest
@@ -160,6 +166,9 @@ spec:
             mountPath: /etc/vmagent
           - name: vmagent-cache-vol
             mountPath: /vmagent-cache
+          - name: timezone
+            mountPath: /etc/localtime
+            readOnly: true
 
       volumes:
         - name: rootfs
@@ -187,6 +196,10 @@ spec:
         - name: timezone
           hostPath:
             path: /etc/localtime # 直接透传宿主机的时区配置
+        - name: udev
+          hostPath:
+            path: /run/udev
+            type: Directory # 确保宿主机该目录已存在
 ---
 apiVersion: v1
 kind: Service

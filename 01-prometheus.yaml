@@ -118,6 +118,9 @@ spec:
             mountPath: /etc/prometheus
           - name: storage-volume
             mountPath: /prometheus
+          - name: timezone
+            mountPath: /etc/localtime
+            readOnly: true
       volumes:
         - name: config-volume
           configMap:
@@ -126,3 +129,6 @@ spec:
           hostPath:
             path: /data/prometheus # 宿主机上的实际路径
             type: DirectoryOrCreate
+        - name: timezone
+          hostPath:
+            path: /etc/localtime
