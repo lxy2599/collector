@@ -1,0 +1,128 @@
+# 1. 创建命名空间
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+
+---
+# 2. RBAC 权限配置
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/proxy", "services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions", "networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: monitoring
+
+---
+# 3. ConfigMap 配置文件
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  # 重点在于out_of_order_time_window，实现过期数据写入
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+    storage:
+      tsdb:
+        out_of_order_time_window: 1d
+---
+# 4. Service 服务
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  type: NodePort
+  ports:
+    - port: 9090
+      targetPort: 9090
+      nodePort: 30009
+
+---
+# 5. StatefulSet (使用 hostPath)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  serviceName: "prometheus"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      hostNetwork: true # 让 Pod 直接使用宿主机 IP 和端口
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: prometheus
+      securityContext:
+        fsGroup: 2000
+        runAsUser: 0  # 实验环境下建议直接用 root，省去权限烦恼
+        runAsGroup: 0
+      # 重要：确保 Pod 总是运行在同一台机器上，否则 hostPath 数据对不上
+      nodeSelector:
+        kubernetes.io/hostname: "k8s-master" # 请修改为你实际的节点名称
+      containers:
+      - name: prometheus
+        image: 192.168.137.97:8086/hthx/prometheus:v2.54.1-arm64
+        args:
+          - "--config.file=/etc/prometheus/prometheus.yml"
+          - "--storage.tsdb.path=/prometheus"
+          - "--web.enable-lifecycle"
+          - "--storage.tsdb.retention.time=15d" # 数据保留15 day
+          - "--web.enable-remote-write-receiver"
+        ports:
+          - containerPort: 9090
+        volumeMounts:
+          - name: config-volume
+            mountPath: /etc/prometheus
+          - name: storage-volume
+            mountPath: /prometheus
+      volumes:
+        - name: config-volume
+          configMap:
+            name: prometheus-config
+        - name: storage-volume
+          hostPath:
+            path: /data/prometheus # 宿主机上的实际路径
+            type: DirectoryOrCreate
