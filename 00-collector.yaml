@@ -137,7 +137,8 @@ spec:
           - "-promscrape.config=/etc/vmagent/prometheus.yml"
           - "-remoteWrite.url=http://192.168.137.97:9090/api/v1/write"
           - "-remoteWrite.tmpDataPath=/vmagent-cache" # 缓存目录
-          - "-remoteWrite.label=node_name=$(NODE_NAME)" 
+          - "-remoteWrite.label=node_name=$(NODE_NAME)"
+          - "-remoteWrite.forcePromProto"
         env:
           - name: NODE_NAME
             valueFrom:
