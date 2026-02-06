@@ -14,31 +14,28 @@
 
 
 ### 1. 核心流程说明
-1.  **策略加载**: `metric-sidecar` (Go 程序) 启动时读取 `nodes.conf`，根据当前主机名决定采集脚本（如 `space_server.sh`）和采集频率（如 `10s`）。
-2.  **硬件读取**: 按照设定的 `Interval`，Sidecar 调用子进程执行 Shell 脚本。脚本通过 `i2c-tools` 直接穿透容器访问宿主机的 `/dev/i2c-X` 接口。
-3.  **指标转换**: 脚本输出 `key=value` 格式数据，Sidecar 解析并映射为 Prometheus 的 `Gauge` 指标。
-4.  **原子写入**: Sidecar 将指标原子化地写入共享目录下的 `.prom` 文件。
-5.  **指标暴露**: `node-exporter` 的 `textfile` 模块扫描该目录，将自定义指标与系统指标合并，通过 `9100` 端口暴露。
+1.  **策略加载**: `metric-sidecar` (Go 程序) 读取 `nodes.conf`，根据 `NODE_NAME` 动态决定采集脚本（如 `space_server.sh`）和采集频率。
+2.  **硬件读取**: Sidecar 周期性调用子进程，脚本通过 `i2c-tools` 穿透容器隔离，直接访问宿主机 `/dev/i2c-X` 接口。
+3.  **指标转换**: 脚本输出 `key=value` 格式数据，Go 程序实时解析并映射为 Prometheus `Gauge` 指标。
+4.  **原子写入**: 采用“临时文件+原子重命名”策略，将指标写入共享卷下的 `.prom` 文件，供 Node Exporter 扫描。
+5.  **可靠推送**: `vmagent` 抓取合并后的指标，通过带缓存的 **Remote Write** 协议推送到 Master 节点的 Prometheus。
 
 ---
 
 ## 关键技术深度解析
 
-### A. 原子化写入机制
-为了防止 `node-exporter` 在读取指标时，Sidecar 恰好正在写入导致数据断裂，程序采用了 **“临时文件 + 原子重命名”** 的策略：
-* **Step 1**: 指标先写入 `custom_metrics.prom.tmp.<pid>.<goroutine>`。
-* **Step 2**: 写入完成后调用 `os.Rename`。在 Linux 文件系统中，`rename` 是原子操作，确保了指标文件始终完整，不会出现读取到一半的情况。
+### A. 原子化写入机制 (Data Consistency)
+为了防止 `node-exporter` 读取到处于写入中间态的残缺数据，系统实现了原子替换逻辑：
+* **Step 1**: 指标先写入 `custom_metrics.prom.tmp.<pid>`。
+* **Step 2**: 写入完成后调用 `os.Rename`。在 Linux 内核中，`rename` 是原子操作，确保了指标文件在任何时刻对读取者都是完整合法的。
 
-### B. 动态频率与策略中心
-通过解析 `nodes.conf` 实现了针对不同节点特征的定制化监控策略：
-* **高频监控**: 对于核心边缘网关（如 `bupt-a`），设置 `10s` 频率，捕捉瞬时电压波动。
-* **空闲/静默模式**: 对于管理节点或非采集节点，Sidecar 进入 **1 小时一次** 的心跳模式，仅打印存活日志，不启动子进程，节省 CPU 与 I/O。
 
-### C. 边缘端优化
-针对边缘设备资源受限的特点：
-* **低开销**: 使用 Go 静态编译，RSS 常驻内存在 **12MB** 左右。
-* **超时闭环**: 使用 `context.WithTimeout` 限制脚本执行时间（默认 10s）。若 I2C 总线因硬件故障卡死，Sidecar 会强制杀死超时进程，防止句柄泄露。
-* **环境自包含**: 镜像基于 Alpine，内置原生链接 `musl libc` 的 `i2c-tools`，解决跨发行版运行时的库依赖问题。
+### B. 边缘端可靠性设计 (Resilience)
+* **断网补数**: `vmagent` 开启 `-remoteWrite.tmpDataPath` 持久化队列。当边缘网络波动时，数据自动积压在宿主机磁盘，网络恢复后全量补传。
+* **乱序容忍**: Prometheus 服务端配置 `out_of_order_time_window: 1d`，允许接收因断网重传导致的“旧”时间戳数据，确保监控曲线连续不中断。
+
+### C. 全链路时区对齐 (Time Sync)
+系统通过挂载宿主机 `/etc/localtime` 并配置环境变量 `TZ=Asia/Shanghai`，实现了 **Sidecar 日志、采集时间戳、Prometheus 存储** 全线对齐北京时间（CST），消除了分布式系统排错中常见的 8 小时偏移偏差。
 
 # Edge-Metrics-Collector 扩展与维护手册
 
@@ -100,32 +97,6 @@
 | **存储路径** | `promFile` | 若修改，必须同步修改 DaemonSet 的启动参数 |
 | **默认采集频率** | `defaultInterval` | 当 `nodes.conf` 未指定频率时的缺省值（默认 15s） |
 | **脚本执行超时** | `context.WithTimeout` | 若硬件响应极慢，可将 10s 调大防止采集被中断 |
-
----
-## 5. 数据链路可靠性设计 (Reliability Architecture)
-为了应对边缘场景下不稳定的网络环境，系统引入了 vmagent 边缘缓存机制，构建了从“传感器”到“云端存储”的可靠传输闭环：
-
-### A. 断网补数与持久化缓存
-
-本地队列: 当边缘节点与 Master 节点的网络断开时，vmagent 会自动将积压的指标数据持久化到宿主机的 /var/lib/vmagent-cache 目录中。
-
-乱序容忍: 在 Prometheus 服务端，通过配置 out_of_order_time_window: 1d，确保网络恢复后，vmagent 重传的带有“历史时间戳”的数据能够被成功写入 TSDB，避免了监控曲线出现“断档”。
-
-### B. 协议优化与强制对齐
-
-Protobuf 强制转换: 开启 -remoteWrite.forcePromProto 参数，统一数据传输协议，降低边缘端的 CPU 序列化开销，同时提高与后端的兼容性。
-
-时间轴统一: 全链路挂载 /etc/localtime，确保从 metric-sidecar 采集时刻到 vmagent 传输日志，再到 Prometheus 系统时间，完全对齐北京时间 (CST)，消除了分布式排错中的 8 小时偏移问题。
-
----
-## 6. Prometheus 服务端配置说明
-系统在 Master 节点部署了单实例 StatefulSet 模式的 Prometheus，关键配置如下：
-
-数据持久化: 使用 hostPath 挂载 /data/prometheus，确保 Pod 重启或迁移（在相同节点）时监控数据不丢失。
-
-生命周期管理: 开启 --web.enable-lifecycle，支持通过 HTTP POST 请求热加载配置，无需重启服务。
-
-远程写入接收: 开启 --web.enable-remote-write-receiver，使其具备接收边缘端 vmagent 推送数据的能力。
 
 ---
 
