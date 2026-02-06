@@ -101,6 +101,8 @@ spec:
           - "--path.rootfs=/host"
           - "--collector.textfile.directory=/var/lib/node_exporter_textfile"
           - "--web.listen-address=:9101"
+          - "--path.procfs=/host/proc"
+          - "--path.sysfs=/host/sys"
         ports:
           - name: metrics
             containerPort: 9101
@@ -112,6 +114,12 @@ spec:
           - name: shared-dir
             mountPath: /var/lib/node_exporter_textfile
             readOnly: false
+          - name: proc
+            mountPath: /host/proc
+            readOnly: true
+          - name: sys
+            mountPath: /host/sys
+            readOnly: true
 
       # --- 容器 B: Sidecar ---
       - name: metric-sidecar
@@ -169,6 +177,10 @@ spec:
           hostPath:
             path: /var/lib/vmagent-cache # 关键：持久化在宿主机，重启不丢数据
             type: DirectoryOrCreate
+        - name: proc
+          hostPath: {path: /proc}
+        - name: sys
+          hostPath: {path: /sys}
 ---
 apiVersion: v1
 kind: Service
