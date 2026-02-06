@@ -120,6 +120,9 @@ spec:
           - name: sys
             mountPath: /host/sys
             readOnly: true
+          - name: timezone
+            mountPath: /etc/localtime
+            readOnly: true
 
       # --- 容器 B: Sidecar ---
       - name: metric-sidecar
@@ -181,6 +184,9 @@ spec:
           hostPath: {path: /proc}
         - name: sys
           hostPath: {path: /sys}
+        - name: timezone
+          hostPath:
+            path: /etc/localtime # 直接透传宿主机的时区配置
 ---
 apiVersion: v1
 kind: Service
