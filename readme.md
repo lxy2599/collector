@@ -102,6 +102,32 @@
 | **脚本执行超时** | `context.WithTimeout` | 若硬件响应极慢，可将 10s 调大防止采集被中断 |
 
 ---
+## 5. 数据链路可靠性设计 (Reliability Architecture)
+为了应对边缘场景下不稳定的网络环境，系统引入了 vmagent 边缘缓存机制，构建了从“传感器”到“云端存储”的可靠传输闭环：
+
+### A. 断网补数与持久化缓存
+
+本地队列: 当边缘节点与 Master 节点的网络断开时，vmagent 会自动将积压的指标数据持久化到宿主机的 /var/lib/vmagent-cache 目录中。
+
+乱序容忍: 在 Prometheus 服务端，通过配置 out_of_order_time_window: 1d，确保网络恢复后，vmagent 重传的带有“历史时间戳”的数据能够被成功写入 TSDB，避免了监控曲线出现“断档”。
+
+### B. 协议优化与强制对齐
+
+Protobuf 强制转换: 开启 -remoteWrite.forcePromProto 参数，统一数据传输协议，降低边缘端的 CPU 序列化开销，同时提高与后端的兼容性。
+
+时间轴统一: 全链路挂载 /etc/localtime，确保从 metric-sidecar 采集时刻到 vmagent 传输日志，再到 Prometheus 系统时间，完全对齐北京时间 (CST)，消除了分布式排错中的 8 小时偏移问题。
+
+---
+## 6. Prometheus 服务端配置说明
+系统在 Master 节点部署了单实例 StatefulSet 模式的 Prometheus，关键配置如下：
+
+数据持久化: 使用 hostPath 挂载 /data/prometheus，确保 Pod 重启或迁移（在相同节点）时监控数据不丢失。
+
+生命周期管理: 开启 --web.enable-lifecycle，支持通过 HTTP POST 请求热加载配置，无需重启服务。
+
+远程写入接收: 开启 --web.enable-remote-write-receiver，使其具备接收边缘端 vmagent 推送数据的能力。
+
+---
 
 ## 变更生效流程
 修改完 `YAML` 或脚本后，请务必执行以下三步以确保边缘端配置更新：
