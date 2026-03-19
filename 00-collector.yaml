@@ -21,8 +21,21 @@ metadata:
 data:
   nodes.conf: |
     bupt-a=space_server:10s
-    k8s-worker1=default:10s
+    k8s-worker1=raspberry_pi:10s
     k8s-master=default:10s
+
+  raspberry_pi.sh: |
+    #!/bin/bash
+    TEMP=$(vcgencmd measure_temp | tr -d "temp=" | tr -d "'C")
+    if [ -n "$TEMP" ]; then
+      echo "temperature=$TEMP"
+    fi
+
+    VOLT=$(vcgencmd measure_volts core | tr -d "volt=" | tr -d "V")
+    if [ -n "$VOLT" ]; then
+      echo "voltage=$VOLT"
+    fi
+
   space_server.sh: |
     #!/bin/bash
     # 增加 -f 强制读取，防止设备 busy，增加 2>/dev/null 防止报错污染输出
@@ -53,20 +66,12 @@ data:
     fi
 
     # 电压监控增加 -f
-    cpu_voltage_raw=$(i2cget -f -y 1 0x41 0x02 w 2>/dev/null)
-    if [ ! -z "$cpu_voltage_raw" ]; then
-        cpu_voltage_hex_le=$(echo $cpu_voltage_raw | awk '{print toupper(substr($1,5,2) substr($1,3,2))}')
-        cpu_voltage=$(echo "ibase=16; $cpu_voltage_hex_le" | bc)
-        cpu_voltage=$(echo "scale=4; $cpu_voltage * 1.25 / 1000" | bc)
-        echo "cpu_voltage=${cpu_voltage}"
-    fi
-
     total_voltage_raw=$(i2cget -f -y 1 0x40 0x02 w 2>/dev/null)
     if [ ! -z "$total_voltage_raw" ]; then
         total_voltage_hex_le=$(echo $total_voltage_raw | awk '{print toupper(substr($1,5,2) substr($1,3,2))}')
         total_voltage=$(echo "ibase=16; $total_voltage_hex_le" | bc)
         total_voltage=$(echo "scale=4; $total_voltage * 1.25 / 1000" | bc)
-        echo "total_voltage=${total_voltage}"
+        echo "voltage=${total_voltage}"
     fi
 ---
 apiVersion: apps/v1
@@ -136,7 +141,7 @@ spec:
 
       # --- 容器 B: Sidecar ---
       - name: metric-sidecar
-        image: 192.168.137.97:8086/hthx/edge-collector-go:v1.0
+        image: 192.168.137.97:8086/hthx/edge-collector-go:v1.1
         securityContext:
           privileged: true
         env:
@@ -154,6 +159,9 @@ spec:
           - name: timezone
             mountPath: /etc/localtime
             readOnly: true
+          # 树莓派挂载
+          - name: vchiq-dev
+            mountPath: /dev/vchiq
       # --- 容器 C: vmagent (新增缓存推送容器) ---
       - name: vmagent
         image: 192.168.137.97:8086/hthx/vmagent:v1.135.0
@@ -178,6 +186,9 @@ spec:
             readOnly: true
 
       volumes:
+        - name: vchiq-dev
+          hostPath:
+            path: /dev/vchiq
         - name: rootfs
           hostPath: {path: /}
         - name: shared-dir

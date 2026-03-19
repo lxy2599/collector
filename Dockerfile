@@ -13,7 +13,12 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o edge-collector col
 
 FROM alpine:3.18
 
-RUN apk add --no-cache bash ca-certificates i2c-tools bc
+RUN apk add --no-cache bash ca-certificates i2c-tools bc || true \
+    && apk add --no-cache raspberrypi || echo "Warning: raspberrypi package not found, skipping..."
+
+# 2. 修复库文件软链接（vcgencmd 经常在 /opt/vc 找库）
+# 如果运行报错，取消下面一行的注释
+# RUN ln -s /usr/lib/libvcos.so.0 /usr/lib/libvcos.so && ln -s /usr/lib/libvchiq_arm.so.0 /usr/lib/libvchiq_arm.so
 
 WORKDIR /app
 COPY --from=builder /app/edge-collector /app/edge-collector
