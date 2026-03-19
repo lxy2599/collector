@@ -85,9 +85,16 @@ spec:
       labels:
         app: node-exporter
     spec:
-      # 【关键 1】只在 ARM64 节点上运行
-      nodeSelector:
-        kubernetes.io/arch: arm64
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - arm64
+                - amd64
       
       # 【关键 2】使用 Host 网络，确保能监控宿主机网络
       hostNetwork: true
@@ -96,7 +103,7 @@ spec:
       containers:
       # --- 容器 A: Node Exporter ---
       - name: node-exporter
-        image: 192.168.137.97:8086/hthx/node-exporter:v1.10.2-arm64
+        image: 192.168.137.97:8086/hthx/node-exporter:v1.10.2
         args:
           - "--path.rootfs=/host"
           - "--collector.textfile.directory=/var/lib/node_exporter_textfile"
@@ -129,7 +136,7 @@ spec:
 
       # --- 容器 B: Sidecar ---
       - name: metric-sidecar
-        image: 192.168.137.97:8086/hthx/edge-collector-go:arm64
+        image: 192.168.137.97:8086/hthx/edge-collector-go:v1.0
         securityContext:
           privileged: true
         env:
@@ -149,7 +156,7 @@ spec:
             readOnly: true
       # --- 容器 C: vmagent (新增缓存推送容器) ---
       - name: vmagent
-        image: 192.168.137.97:8086/hthx/vmagent:arm64-latest
+        image: 192.168.137.97:8086/hthx/vmagent:v1.135.0
         args:
           - "-promscrape.config=/etc/vmagent/prometheus.yml"
           - "-remoteWrite.url=http://192.168.137.97:9090/api/v1/write"
