@@ -23,7 +23,33 @@ data:
     bupt-a=space_server:10s
     k8s-worker1=raspberry_pi:10s
     k8s-master=default:10s
+    jetson=jetson:10s
 
+  jetson.sh: |
+    #!/bin/bash
+    # GPU利用率%
+    if [ -f /sys/devices/gpu.0/load ]; then
+      GPU_LOAD=$(cat /sys/devices/gpu.0/load)
+      echo "gpu_utilization=$(echo "scale=2; $GPU_LOAD / 10" | bc)"
+    fi
+    # 温度摄氏度
+    if [ -f /sys/class/thermal/thermal_zone2/temp ]; then
+      TEMP_RAW=$(cat /sys/class/thermal/thermal_zone2/temp)
+      echo "temperature=$(echo "scale=2; $TEMP_RAW / 1000" | bc)"
+    fi
+    # 显存利用率
+    MEM_TOTAL=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    MEM_AVAIL=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    if [ -n "$MEM_TOTAL" ] && [ -n "$MEM_AVAIL" ]; then
+      MEM_USED=$((MEM_TOTAL - MEM_AVAIL))
+      echo "mem_utilization=$(echo "scale=2; $MEM_USED * 100 / $MEM_TOTAL" | bc)"
+    fi
+    # 电压
+    VOLT_PATH="/sys/bus/i2c/drivers/ina3221x/0-0040/iio:device0/in_voltage0_input"
+    if [ -f "$VOLT_PATH" ]; then
+      VOLT_RAW=$(cat "$VOLT_PATH")
+      echo "voltage=$(echo "scale=2; $VOLT_RAW / 1000" | bc)"
+    fi
   raspberry_pi.sh: |
     #!/bin/bash
     TEMP=$(vcgencmd measure_temp | tr -d "temp=" | tr -d "'C")
@@ -162,6 +188,9 @@ spec:
           # 树莓派挂载
           - name: vchiq-dev
             mountPath: /dev/vchiq
+          # TX2挂在
+          - name: sys
+            mountPath: /sys
       # --- 容器 C: vmagent (新增缓存推送容器) ---
       - name: vmagent
         image: 192.168.137.97:8086/hthx/vmagent:v1.135.0
