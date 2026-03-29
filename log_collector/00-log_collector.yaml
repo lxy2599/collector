@@ -26,9 +26,46 @@ subjects:
 - kind: ServiceAccount
   name: fluent-bit
   namespace: monitoring
-
 ---
-# 2. Loki 部署 (强制调度至云端主节点)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: monitoring
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+    common:
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      retention_period: 48h
+    compactor:
+      working_directory: /loki/retention
+      compaction_interval: 10m
+      retention_enabled: true
+      retention_delete_delay: 2h
+      retention_delete_worker_count: 150
+      delete_request_store: filesystem
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,8 +83,11 @@ spec:
       labels:
         app: loki
     spec:
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsUser: 10001
       hostNetwork: true
-      # 强制调度到云端主节点
       nodeSelector:
         node-role.kubernetes.io/control-plane: ""
       tolerations:
@@ -60,6 +100,8 @@ spec:
       containers:
       - name: loki
         image: 192.168.137.97:8086/hthx/loki:3.5.12-arm64
+        args:
+          - "-config.file=/etc/loki/loki.yaml"
         ports:
         - containerPort: 3100
           name: http-metrics
@@ -68,6 +110,19 @@ spec:
             path: /ready
             port: 3100
           initialDelaySeconds: 5
+        volumeMounts:
+        - name: config
+          mountPath: /etc/loki
+        - name: storage
+          mountPath: /loki
+      volumes:
+      - name: config
+        configMap:
+          name: loki-config
+      - name: storage
+        hostPath:
+          path: /var/lib/loki
+          type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
@@ -81,7 +136,6 @@ spec:
     - protocol: TCP
       port: 3100
       targetPort: 3100
-
 ---
 # 3. Fluent Bit 配置中心
 apiVersion: v1
@@ -102,15 +156,16 @@ data:
         Name                tail
         Tag                 kube.*
         Path                /var/log/containers/*.log
-        multiline.parser    docker, cri
+        multiline.parser    docker, cri, java 
         DB                  /var/log/fluent-bit/flb_kube.db
-        Mem_Buf_Limit       10MB
+        Mem_Buf_Limit       20MB
         Skip_Long_Lines     On
 
     [FILTER]
         Name                kubernetes
         Match               kube.*
-        Kube_URL            https://kubernetes.default.svc:443
+        Kube_URL            https://192.168.137.97:6443
+        tls.verify          Off
         Merge_Log           On
         Keep_Log            Off
 
@@ -136,7 +191,7 @@ data:
         Match               kube.*
         Host                192.168.137.97
         Port                3100
-        Labels              job=fluent-bit, node_instance=$node_name
+        Labels              job=fluent-bit, node_instance=${NODE_NAME}
         auto_kubernetes_labels on
         compress            gzip
 
