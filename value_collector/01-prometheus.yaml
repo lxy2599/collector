@@ -111,6 +111,7 @@ spec:
           - "--web.enable-lifecycle"
           - "--storage.tsdb.retention.time=15d" # 数据保留15 day
           - "--web.enable-remote-write-receiver"
+          - "--query.lookback-delta=30s"
         ports:
           - containerPort: 9090
         volumeMounts:
