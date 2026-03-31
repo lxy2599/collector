@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-log-tester
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-tester
+  template:
+    metadata:
+      labels:
+        app: log-tester
+    spec:
+      # 强制调度到你的树莓派节点
+      nodeSelector:
+        kubernetes.io/hostname: k8s-worker1
+      containers:
+      - name: logger
+        # 请根据你的仓库地址修改镜像名
+        image: 192.168.137.97:8086/hthx/log-test:v1.0-arm64
+        imagePullPolicy: Always
+      restartPolicy: Always
