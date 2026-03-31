@@ -127,10 +127,9 @@ spec:
                 - arm64
                 - amd64
       
-      # 【关键 2】使用 Host 网络，确保能监控宿主机网络
-      hostNetwork: true
-      hostPID: true
-      
+      # hostNetwork: true # --- 修改点：删除 ---
+      # hostPID: true     # --- 修改点：删除，提升安全性 ---
+      dnsPolicy: ClusterFirst # 使用标准 DNS 策略
       containers:
       # --- 容器 A: Node Exporter ---
       - name: node-exporter
@@ -196,7 +195,7 @@ spec:
         image: 192.168.137.97:8086/hthx/vmagent:v1.135.0
         args:
           - "-promscrape.config=/etc/vmagent/prometheus.yml"
-          - "-remoteWrite.url=http://192.168.137.97:9090/api/v1/write"
+          - "-remoteWrite.url=http://prometheus-service.monitoring.svc.cluster.local:9090/api/v1/write"
           - "-remoteWrite.tmpDataPath=/vmagent-cache" # 缓存目录
           - "-remoteWrite.label=node_name=$(NODE_NAME)"
           - "-remoteWrite.forcePromProto"
