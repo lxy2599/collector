@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: resource-demo
+  namespace: default
+spec:
+  containers:
+  - name: main-container
+    image: 192.168.137.97:8086/hthx/nginx-arm64:v1.0
+    resources:
+      # 调度依据：集群必须满足这些资源才会运行该 Pod
+      requests:
+        memory: "256Mi"    # 内存请求：256 Mebibytes
+        cpu: "500m"        # CPU 请求：0.5 核
+      
+      # 运行时约束：容器允许使用的最大资源上限
+      limits:
+        memory: "512Mi"    # 内存上限：512 Mebibytes
+        cpu: "1000m"       # CPU 上限：1 核 (1000 millicores)
