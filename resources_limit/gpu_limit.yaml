@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-app
+  template:
+    metadata:
+      labels:
+        app: gpu-app
+    spec:
+      containers:
+      - name: cuda-container
+        image: nvidia/cuda:11.0-base
+        resources:
+          limits:
+            # 限制使用 1 块 NVIDIA GPU
+            nvidia.com/gpu: 1 
+          # 可选：建议显式写出 requests，且数值必须与 limits 相等
+          requests:
+            nvidia.com/gpu: 1
