@@ -37,6 +37,7 @@ data:
     auth_enabled: false
     server:
       http_listen_port: 3100
+
     common:
       path_prefix: /loki
       storage:
@@ -47,23 +48,40 @@ data:
       ring:
         kvstore:
           store: inmemory
+
+    # --- 修正点 1：统一 Ingester 和 Block Builder 的窗口 ---
+    ingester:
+      max_chunk_age: 336h
+
+    block_builder:
+      max_chunk_age: 336h
+
     schema_config:
       configs:
-        - from: 2020-10-24
+        - from: "2020-10-24"
           store: tsdb
           object_store: filesystem
           schema: v13
           index:
             prefix: index_
-            period: 24h
+            period: 1d
+
+    # --- 修正点 2：统一 Limits 和 Table Manager 的保留期 ---
     limits_config:
-      retention_period: 48h
+      retention_period: 168h
+      unordered_writes: true
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+
+    table_manager:
+      retention_deletes_enabled: true
+      retention_period: 168h
+
     compactor:
       working_directory: /loki/retention
       compaction_interval: 10m
       retention_enabled: true
       retention_delete_delay: 2h
-      retention_delete_worker_count: 150
       delete_request_store: filesystem
 ---
 apiVersion: apps/v1
@@ -150,7 +168,10 @@ data:
         Daemon        Off
         Log_Level     info
         Parsers_File  parsers.conf
+        storage.type  filesystem
         storage.path  /var/log/fluent-bit/storage/
+        storage.backlog.mem_limit 50M
+
 
     [INPUT]
         Name                tail
@@ -158,9 +179,10 @@ data:
         Path                /var/log/containers/*.log
         multiline.parser    docker, cri, java 
         DB                  /var/log/fluent-bit/flb_kube.db
-        Mem_Buf_Limit       20MB
+        Mem_Buf_Limit       100MB
         Skip_Long_Lines     On
 
+    # 1. 首先获取 K8s 元数据，否则拿不到 pod_name
     [FILTER]
         Name                kubernetes
         Match               kube.*
@@ -170,22 +192,35 @@ data:
         Keep_Log            Off
 
     [FILTER]
-        Name                record_modifier
+        Name                rewrite_tag
         Match               kube.*
-        Record              node_name ${NODE_NAME}
+        # 匹配任何包含 deployment 字符串的 pod 名
+        Rule                $kubernetes['pod_name']  deployment  deploy_logs  true
 
+    # -----------------------------------------------------------
+    # 链路 A：处理普通日志 (剩下的 kube.*)，依然只保留 ERROR
+    # -----------------------------------------------------------
     [FILTER]
         Name                grep
         Match               kube.*
-
         Regex               log (?i)error
 
-    [FILTER]
-        Name                multiline
-        Match               kube.*
-        Multiline.key_content log
-        Multiline.parser    java, python
+    # -----------------------------------------------------------
+    # 链路 B：处理带 deployment 的日志 (deploy_logs)，不做 error 过滤
+    # -----------------------------------------------------------
+    # 这里不需要 grep，所以它会保留所有级别的日志
 
+    # 为所有日志添加节点信息
+    [FILTER]
+        Name                record_modifier
+        Match               *
+        Record              node_name ${NODE_NAME}
+
+    # -----------------------------------------------------------
+    # 输出配置
+    # -----------------------------------------------------------
+
+    # 输出 A：普通 Error 日志
     [OUTPUT]
         Name                loki
         Match               kube.*
@@ -193,7 +228,17 @@ data:
         Port                3100
         Labels              job=fluent-bit, node_instance=${NODE_NAME}
         auto_kubernetes_labels on
-        compress            gzip
+
+    # 输出 B：Deployment 专项日志
+    [OUTPUT]
+        Name                loki
+        Match               deploy_logs
+        Host                192.168.137.97
+        Port                3100
+        # 移除 auto_kubernetes_labels 看看手动标签是否生效
+        Labels              job=inference, node_instance=${NODE_NAME}
+        # 如果非要开启，确保标签不冲突
+        auto_kubernetes_labels on
 
   parsers.conf: |
     [PARSER]
