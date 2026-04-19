@@ -10,7 +10,7 @@ func main() {
 	count := 0
 	for {
 		// 打印带有时间戳的日志
-		fmt.Printf("[%s] Log ID: %d | Status: ERROR Edge node is logging locally...\n",
+		fmt.Printf("New Version v1.2 [%s] Log ID: %d | Status: ERROR Edge node is logging locally...\n",
 			time.Now().Format("2006-01-02 15:04:05"), count)
 		count++
 		time.Sleep(10 * time.Second)

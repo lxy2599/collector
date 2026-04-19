@@ -11,7 +11,7 @@ data:
       - job_name: 'edge-node-metrics'
         honor_labels: true
         static_configs:
-          - targets: ['127.0.0.1:9101'] # 抓取同 Pod 内的 Node Exporter
+          - targets: ['localhost:9101'] # 抓取同 Pod 内的 Node Exporter
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -127,23 +127,23 @@ spec:
                 - arm64
                 - amd64
       
-      # hostNetwork: true # --- 修改点：删除 ---
-      # hostPID: true     # --- 修改点：删除，提升安全性 ---
-      dnsPolicy: ClusterFirst # 使用标准 DNS 策略
+      # 【关键 2】使用 Host 网络，确保能监控宿主机网络
+      hostNetwork: true
+      hostPID: true
+      
       containers:
       # --- 容器 A: Node Exporter ---
       - name: node-exporter
-        image: 192.168.137.97:8086/hthx/node-exporter:v1.10.2
+        image: 192.168.137.97:8086/hthx/node-exporter:v1.10.2-arm64
         args:
           - "--path.rootfs=/host"
           - "--collector.textfile.directory=/var/lib/node_exporter_textfile"
-          - "--web.listen-address=:9101"
+          - "--web.listen-address=0.0.0.0:9101"
           - "--path.procfs=/host/proc"
           - "--path.sysfs=/host/sys"
         ports:
           - name: metrics
             containerPort: 9101
-            hostPort: 9101
         volumeMounts:
           - name: rootfs
             mountPath: /host
@@ -166,7 +166,7 @@ spec:
 
       # --- 容器 B: Sidecar ---
       - name: metric-sidecar
-        image: 192.168.137.97:8086/hthx/edge-collector-go:v1.1
+        image: 192.168.137.97:8086/hthx/edge-collector-go:v1.1-arm64
         securityContext:
           privileged: true
         env:
@@ -192,13 +192,14 @@ spec:
             mountPath: /sys
       # --- 容器 C: vmagent (新增缓存推送容器) ---
       - name: vmagent
-        image: 192.168.137.97:8086/hthx/vmagent:v1.135.0
+        image: 192.168.137.97:8086/hthx/vmagent:v1.135.0-arm64
         args:
           - "-promscrape.config=/etc/vmagent/prometheus.yml"
-          - "-remoteWrite.url=http://prometheus-service.monitoring.svc.cluster.local:9090/api/v1/write"
+          - "-remoteWrite.url=http://192.168.137.97:9090/api/v1/write"
           - "-remoteWrite.tmpDataPath=/vmagent-cache" # 缓存目录
           - "-remoteWrite.label=node_name=$(NODE_NAME)"
           - "-remoteWrite.forcePromProto"
+          - "-enableTCP6"
         env:
           - name: NODE_NAME
             valueFrom:

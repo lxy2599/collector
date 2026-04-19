@@ -1,7 +1,25 @@
 #!/bin/bash
 
 # Copyright 2021 The KubeEdge Authors.
-# Modified for non-hostNetwork deployment with hostPort mapping
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Influential env vars:
+#
+# SEDNA_ACTION    | optional | 'create'/'clean', default is 'create'
+# SEDNA_VERSION   | optional | The Sedna version to be installed.
+#                              if not specified, it will get latest release version.
+# SEDNA_ROOT      | optional | The Sedna offline directory
 
 set -o errexit
 set -o nounset
@@ -9,62 +27,103 @@ set -o pipefail
 
 TMP_DIR='/opt/sedna'
 SEDNA_ROOT=${SEDNA_ROOT:-$TMP_DIR}
+
 DEFAULT_SEDNA_VERSION=v0.7.0
 
-# -----------------------------------------------------------
-# 基础工具函数
-# -----------------------------------------------------------
+
 
 get_latest_version() {
+  # get Sedna latest release version
   local repo=kubeedge/sedna
+  # output of this latest page:
+  # ...
+  # "tag_name": "v1.0.0",
+  # ...
   {
     curl -s https://api.github.com/repos/$repo/releases/latest |
     awk '/"tag_name":/&&$0=$2' |
     sed 's/[",]//g'
-  } || echo $DEFAULT_SEDNA_VERSION
+  } || echo $DEFAULT_SEDNA_VERSION # fallback
 }
 
 : ${SEDNA_VERSION:=$(get_latest_version)}
 SEDNA_VERSION=v${SEDNA_VERSION#v}
 
 _download_yamls() {
+
   yaml_dir=$1
   mkdir -p ${SEDNA_ROOT}/$yaml_dir
   cd ${SEDNA_ROOT}/$yaml_dir
   for yaml in ${yaml_files[@]}; do
+    # the yaml file already exists, no need to download
     [ -e "$yaml" ] && continue
+
     echo downloading $yaml into ${SEDNA_ROOT}/$yaml_dir
     local try_times=30 i=1 timeout=2
     while ! timeout ${timeout}s curl -sSO https://raw.githubusercontent.com/kubeedge/sedna/main/$yaml_dir/$yaml; do
-      ((++i>try_times)) && { echo timeout to download $yaml; exit 2; }
+      ((++i>try_times)) && {
+        echo timeout to download $yaml
+        exit 2
+      }
       echo -en "retrying to download $yaml after $[i*timeout] seconds...\r"
     done
   done
 }
 
 download_yamls() {
-  yaml_files=(sedna.io_datasets.yaml sedna.io_federatedlearningjobs.yaml sedna.io_incrementallearningjobs.yaml sedna.io_jointinferenceservices.yaml sedna.io_lifelonglearningjobs.yaml sedna.io_models.yaml)
+  yaml_files=(
+  sedna.io_datasets.yaml
+  sedna.io_federatedlearningjobs.yaml
+  sedna.io_incrementallearningjobs.yaml
+  sedna.io_jointinferenceservices.yaml
+  sedna.io_lifelonglearningjobs.yaml
+  sedna.io_models.yaml
+  )
   _download_yamls build/crds
-  yaml_files=(gm.yaml)
+  yaml_files=(
+    gm.yaml
+  )
   _download_yamls build/gm/rbac
 }
 
 prepare_install(){
-  kubectl create ns sedna || true
+  # need to create the namespace first
+  kubectl create ns sedna
+}
+
+prepare() {
+  mkdir -p ${SEDNA_ROOT}
+  
+  # we only need build directory
+  # here don't use git clone because of large vendor directory
+  download_yamls
+}
+
+cleanup(){
+  kubectl delete ns sedna
 }
 
 create_crds() {
   cd ${SEDNA_ROOT}
-  kubectl create -f build/crds || true
+  kubectl create -f build/crds
 }
 
-# -----------------------------------------------------------
-# 组件创建函数 (核心修改部分)
-# -----------------------------------------------------------
+delete_crds() {
+  cd ${SEDNA_ROOT}
+  kubectl delete -f build/crds --timeout=90s
+}
 
-# 1. Knowledge Base (KB) - 使用 hostPort 保持 9020
+get_service_address() {
+  local service=$1
+  local port=$(kubectl -n sedna get svc $service -ojsonpath='{.spec.ports[0].port}')
+
+  # <service-name>.<namespace>:<port>
+  echo $service.sedna:$port
+}
+
 create_kb(){
   cd ${SEDNA_ROOT}
+
   kubectl $action -f - <<EOF
 apiVersion: v1
 kind: Service
@@ -74,16 +133,19 @@ metadata:
 spec:
   selector:
     sedna: kb
+  type: ClusterIP
   ports:
     - protocol: TCP
       port: 9020
       targetPort: 9020
-      name: "tcp-0"
+      name: "tcp-0"  # required by edgemesh, to clean
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kb
+  labels:
+    sedna: kb
   namespace: sedna
 spec:
   replicas: 1
@@ -95,7 +157,7 @@ spec:
       labels:
         sedna: kb
     spec:
-      dnsPolicy: ClusterFirst
+      hostNetwork: true
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -106,16 +168,20 @@ spec:
       serviceAccountName: sedna
       containers:
       - name: kb
+        imagePullPolicy: IfNotPresent
         image: kubeedge/sedna-kb:$SEDNA_VERSION
-        ports:
-          - containerPort: 9020
-            hostPort: 9020 # 宿主机端口保持 9020
         env:
           - name: KB_URL
             value: "sqlite:///db/kb.sqlite3"
         volumeMounts:
-          - name: kb-url
-            mountPath: /db
+        - name: kb-url
+          mountPath: /db
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
       volumes:
         - name: kb-url
           hostPath:
@@ -124,13 +190,17 @@ spec:
 EOF
 }
 
-# 2. Global Manager (GM) - 使用 hostPort 保持 9000 & NodePort 30000
-create_gm() {
-  cd ${SEDNA_ROOT}
-  kubectl create -f build/gm/rbac/ || true
+prepare_gm_config_map() {
 
-  # 准备 ConfigMap，LC 将通过 Service 域名连接 KB
-  cat > ${SEDNA_ROOT}/gm.yaml << EOF
+  KB_ADDRESS=$(get_service_address kb)
+
+  cm_name=${1:-gm-config}
+  config_file=${TMP_DIR}/${2:-gm.yaml}
+
+  if [ -n "${SEDNA_GM_CONFIG:-}" ] && [ -f "${SEDNA_GM_CONFIG}" ] ; then
+    cp "$SEDNA_GM_CONFIG" $config_file
+  else
+    cat > $config_file << EOF
 kubeConfig: ""
 master: ""
 namespace: ""
@@ -138,11 +208,25 @@ websocket:
   address: 0.0.0.0
   port: 9000
 localController:
-  server: http://localhost:9100
+  server: http://localhost:${SEDNA_LC_BIND_PORT:-9100}
 knowledgeBaseServer:
-  server: http://kb.sedna.svc.cluster.local:9020
+  server: http://$KB_ADDRESS
 EOF
-  kubectl $action -n sedna configmap gm-config --from-file=${SEDNA_ROOT}/gm.yaml || true
+  fi
+
+  kubectl $action -n sedna configmap $cm_name --from-file=$config_file
+}
+
+create_gm() {
+
+  cd ${SEDNA_ROOT}
+
+  kubectl create -f build/gm/rbac/
+
+  cm_name=gm-config
+  config_file_name=gm.yaml
+  prepare_gm_config_map $cm_name $config_file_name
+
 
   kubectl $action -f - <<EOF
 apiVersion: v1
@@ -153,17 +237,21 @@ metadata:
 spec:
   selector:
     sedna: gm
+  # 修改为NodePort
   type: NodePort
   ports:
     - protocol: TCP
       port: 9000
       targetPort: 9000
-      nodePort: 30000 # 保持 NodePort 30000
+      name: "tcp-0"  # required by edgemesh, to clean
+      nodePort: 30000 # <--- 添加这一行
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gm
+  labels:
+    sedna: gm
   namespace: sedna
 spec:
   replicas: 1
@@ -175,7 +263,8 @@ spec:
       labels:
         sedna: gm
     spec:
-      dnsPolicy: ClusterFirst
+      hostNetwork: true # <--- 添加这一行
+      dnsPolicy: ClusterFirstWithHostNet # <--- 添加这一行，确保 hostNetwork 下能解析 DNS
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -187,29 +276,47 @@ spec:
       containers:
       - name: gm
         image: kubeedge/sedna-gm:$SEDNA_VERSION
-        command: ["sedna-gm", "--config", "/config/gm.yaml", "-v2"]
-        ports:
-          - containerPort: 9000
-            hostPort: 9000 # 宿主机端口保持 9000
+        command: ["sedna-gm", "--config", "/config/$config_file_name", "-v2"]
+        env:
+          - name: KUBERNETES_SERVICE_HOST
+            value: "192.168.137.97"  # <--- Master 物理 IP
+          - name: KUBERNETES_SERVICE_PORT
+            value: "6443"           # <--- API Server 端口
         volumeMounts:
-          - name: gm-config
-            mountPath: /config
+        - name: gm-config
+          mountPath: /config
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 100m
+          limits:
+            memory: 256Mi
       volumes:
         - name: gm-config
           configMap:
-            name: gm-config
+            name: $cm_name
 EOF
 }
 
-# 3. Local Controller (LC) - 使用域名连接 GM，hostPort 保持 9100
-create_lc() {
-  # 边缘节点通过域名访问 GM，EdgeMesh 负责解析
-  local GM_FQDN="gm.sedna.svc.cluster.local:9000"
+delete_gm() {
+  cd ${SEDNA_ROOT}
 
+  kubectl delete -f build/gm/rbac/
+
+  # no need to clean gm deployment alone
+}
+
+create_lc() {
+
+  # GM_ADDRESS=$(get_service_address gm)
+  # 写死主节点
+  GM_ADDRESS="192.168.137.97:9000"
   kubectl $action -f- <<EOF
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
+  labels:
+    sedna: lc
   name: lc
   namespace: sedna
 spec:
@@ -221,24 +328,32 @@ spec:
       labels:
         sedna: lc
     spec:
-      dnsPolicy: ClusterFirst
       containers:
         - name: lc
           image: kubeedge/sedna-lc:$SEDNA_VERSION
           env:
+            - name: KUBERNETES_SERVICE_HOST
+              value: "192.168.137.97"  # <--- Master 物理 IP
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"           # <--- API Server 端口
+          env:
             - name: GM_ADDRESS
-              value: "$GM_FQDN"
+              value: $GM_ADDRESS
             - name: BIND_PORT
-              value: "9100"
+              value: "${SEDNA_LC_BIND_PORT:-9100}"
             - name: NODENAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: ROOTFS_MOUNT_DIR
+              # the value of ROOTFS_MOUNT_DIR is same with the mount path of volume
               value: /rootfs
-          ports:
-            - containerPort: 9100
-              hostPort: 9100 # 宿主机端口保持 9100
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 100m
+            limits:
+              memory: 128Mi
           volumeMounts:
             - name: localcontroller
               mountPath: /rootfs
@@ -247,37 +362,91 @@ spec:
           hostPath:
             path: /
       restartPolicy: Always
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
 EOF
 }
 
-# -----------------------------------------------------------
-# 流程控制
-# -----------------------------------------------------------
+delete_lc() {
+  # ns would be deleted in delete_gm
+  # so no need to clean lc alone
+  return
+}
 
 wait_ok() {
-  echo "Waiting Sedna components to be ready..."
-  kubectl -n sedna wait --for=condition=available --timeout=300s deployment/gm || true
+  echo "Waiting control components to be ready..."
+  kubectl -n sedna wait --for=condition=available --timeout=600s deployment/gm
+  kubectl -n sedna wait pod --for=condition=Ready --selector=sedna
   kubectl -n sedna get pod
 }
 
-do_check() {
+delete_pods() {
+  # in case some nodes are not ready, here delete with a 60s timeout, otherwise force delete these
+  kubectl -n sedna delete pod --all --timeout=60s || kubectl -n sedna delete pod --all --force --grace-period=0
+}
+
+check_kubectl () {
+  kubectl get pod >/dev/null
+}
+
+check_action() {
   action=${SEDNA_ACTION:-create}
+  support_action_list="create delete"
+  if ! echo "$support_action_list" | grep -w -q "$action"; then
+    echo "\`$action\` not in support action list: create/delete!" >&2
+    echo "You need to specify it by setting $(red_text SEDNA_ACTION) environment variable when running this script!" >&2
+    exit 2
+  fi
+  
+}
+
+do_check() {
+  check_kubectl
+  check_action
+}
+
+show_debug_infos() {
+  cat - <<EOF
+Sedna is $(green_text running):
+See GM status: kubectl -n sedna get deploy
+See LC status: kubectl -n sedna get ds lc
+See Pod status: kubectl -n sedna get pod
+EOF
+}
+
+NO_COLOR='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+green_text() {
+  echo -ne "$GREEN$@$NO_COLOR"
+}
+
+red_text() {
+  echo -ne "$RED$@$NO_COLOR"
 }
 
 do_check
+
 case "$action" in
   create)
-    echo "Installing Sedna $SEDNA_VERSION (Non-HostNetwork Mode)..."
+    echo "Installing Sedna $SEDNA_VERSION..."
     prepare_install
-    download_yamls
     create_crds
     create_kb
     create_gm
     create_lc
     wait_ok
+    show_debug_infos
     ;;
+
   delete)
-    kubectl delete ns sedna --ignore-not-found
-    echo "Sedna uninstalled."
+    # no errexit when fail to clean
+    set +o errexit
+    delete_pods
+    delete_gm
+    delete_lc
+    delete_crds
+    cleanup
+    echo "$(green_text Sedna is uninstalled successfully)"
     ;;
 esac
